@@ -101,7 +101,7 @@ class BondFeaturiser(object):
 
         if stereo_types is None:
             stereo_types = [
-                Chem.rdchem.BondStereo.STEREONONE,
+                Chem.rdchem.BondStereo.STEREONONE, Chem.rdchem.BondStereo.STEREOANY,
                 Chem.rdchem.BondStereo.STEREOCIS, Chem.rdchem.BondStereo.STEREOTRANS,
                 Chem.rdchem.BondStereo.STEREOZ, Chem.rdchem.BondStereo.STEREOE
             ]

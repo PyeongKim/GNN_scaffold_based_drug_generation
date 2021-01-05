@@ -20,9 +20,10 @@ from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers
 from rdkit.Chem import AllChem
-from m_helper_functions import dgl_to_mol, enum_stereoisomer
+from m_helper_functions import dgl_to_mol
 from operator import itemgetter
 from molvs import charge
+from dgl.data.utils import load_graphs
 
 class MolGraphData(Dataset):
 
@@ -46,14 +47,11 @@ class MolGraphData(Dataset):
         single_smi = self.whole_df.loc[index].smiles
         #print(single_smi)
         mol = Chem.MolFromSmiles(single_smi)
-        #s = Standardizer()
-        #mol = s.standardize(mol)
-        g, g_scaffold, action, isomer_target = self.mol_to_graph(mol)
-        #print("graph", g)
-        _, smiles = dgl_to_mol(g) #test_fix_all
-        #print("complete")
+
+        g, g_scaffold, action = self.mol_to_graph(mol)
+
         conditions = list(self.whole_df.loc[index][self.conditions])
-        return g, g_scaffold, action, conditions, isomer_target, self.whole_df.loc[index].ID, self.smi #test_fix_all
+        return g, g_scaffold, action, conditions
 
     def construct_bigraph_from_mol(self, mol):
 
@@ -113,21 +111,20 @@ class MolGraphData(Dataset):
         g_scaffold.edata.update(self.bond_featuriser(core))
 
 
-
-
-        isomer, iso_smi = dgl_to_mol(mol)
+        """
+        isomer, iso_smi = dgl_to_mol(g)
         isomers = tuple(EnumerateStereoisomers(isomer))
         smiles = []
         for smi in sorted(Chem.MolToSmiles(x, isomericSmiles=True) for x in isomers):
             smiles.append(smi)
-        original = Chem.MolToSmiles(mol, isomericSmiles=True)
+        _, original = mol_with_stereochemistry(mol)
         try:
             index = smiles.index(original)
             isomer_target = [0]*len(smiles)
             isomer_target[index] = 1
         except:
             isomer_target = [1]*len(smiles)
-
+        """
         actions = []
         src, dest = g.edges()
         for i in range(core.GetNumAtoms(), mol.GetNumAtoms()):
@@ -157,7 +154,7 @@ class MolGraphData(Dataset):
                         -1
                         ])
 
-        return g, g_scaffold, actions, isomer_target
+        return g, g_scaffold, actions
 
     def __len__(self):
         return self.data_len
@@ -169,8 +166,7 @@ class MolGraphData(Dataset):
         list_g_scaffold = []
         list_action = []
         list_condition = []
-        list_isomer_target = []
-        for i, (g, g_scaffold, action, condition, isomer_target, id, smi) in enumerate(batch): #test_fix_all
+        for i, (g, g_scaffold, action, condition) in enumerate(batch): #test_fix_all
             node_index.extend([i]*g.num_nodes())
             edge_index.extend([i]*g.num_edges())
             node_s_index.extend([i]*g_scaffold.num_nodes())
@@ -179,12 +175,62 @@ class MolGraphData(Dataset):
             list_g_scaffold.append(g_scaffold)
             list_action.append(action)
             list_condition.append(condition)
-            list_isomer_target.append(isomer_target)
-        return dgl.batch(list_g), dgl.batch(list_g_scaffold), \
-               list_action, torch.tensor(list_condition), list_isomer_target, \
-               torch.tensor(edge_index),torch.tensor(node_index), \
-               torch.tensor(edge_s_index),torch.tensor(node_s_index), id, smi #test_fix_all
 
+        return dgl.batch(list_g), dgl.batch(list_g_scaffold), \
+               list_action, torch.tensor(list_condition), \
+               torch.tensor(edge_index),torch.tensor(node_index), \
+               torch.tensor(edge_s_index),torch.tensor(node_s_index) #test_fix_all
+
+
+class MolGraphDataTest(Dataset):
+
+    def __init__(self, path_to_pkl, whole_bin, scaffold_bin, conditions, normalised=True):
+        super(MolGraphDataTest, self).__init__()
+        self.whole_df = pd.read_pickle(path_to_pkl)
+        self.whole_graphs, self.whole_index = load_graphs(whole_bin)
+        self.scaffod_graphs, self.scaffold_index = load_graphs(scaffold_bin)
+        self.conditions = conditions
+        self.conditions.extend(["scaffold_"+c for c in conditions])
+        #print("condition",conditions, self.conditions)
+        self.data_len = self.whole_df.shape[0]
+        self.normalised = normalised
+        if not normalised:
+          mean = {"clogp":3.589836, "tpsa":77.059375, "mw":389.977723}
+          std = {"clogp":1.961023, "tpsa":25.281207, "mw":80.655741}
+          for c in conditions:
+              self.whole_df[[c, "scaffold_"+c]] = (self.whole_df[[c, "scaffold_"+c]] - mean[c])/std[c]
+
+    def __getitem__(self, index):
+        g = self.whole_graphs[index]
+        g_scaffold = self.scaffod_graphs[index]
+        actions = self.whole_df.loc[index, "actions"]
+        conditions = list(self.whole_df.loc[index][self.conditions])
+        return g, g_scaffold, actions, conditions
+
+    def __len__(self):
+        return self.data_len
+
+    def collate_fn(self, batch):
+        node_index, edge_index= [], []
+        node_s_index, edge_s_index= [], []
+        list_g = []
+        list_g_scaffold = []
+        list_action = []
+        list_condition = []
+        for i, (g, g_scaffold, action, condition) in enumerate(batch): #test_fix_all
+            node_index.extend([i]*g.num_nodes())
+            edge_index.extend([i]*g.num_edges())
+            node_s_index.extend([i]*g_scaffold.num_nodes())
+            edge_s_index.extend([i]*g_scaffold.num_edges())
+            list_g.append(g)
+            list_g_scaffold.append(g_scaffold)
+            list_action.append(action)
+            list_condition.append(condition)
+
+        return dgl.batch(list_g), dgl.batch(list_g_scaffold), \
+               list_action, torch.tensor(list_condition), \
+               torch.tensor(edge_index),torch.tensor(node_index), \
+               torch.tensor(edge_s_index),torch.tensor(node_s_index) #test_fix_all
 
 class MolGraphDataSampling(Dataset):
     def __init__(self, path_to_df, node_featuriser, edge_featuriser, conditions, normalised=True):
@@ -281,36 +327,48 @@ if __name__=="__main__":
     #IPythonConsole.ipython_useSVG=True
     start = time.process_time()
     conditions = ["clogp","mw","tpsa"]
-    path_to_df = "/BiO/pekim/GRAPHNET/data/normalised_filtered_data.csv"
+    path_to_df = "/BiO/pekim/GRAPHNET/data/small.csv"
     dataset = MolGraphData(path_to_df, AtomFeaturiser(), BondFeaturiser(), conditions)
     end = time.process_time()
-    print("time spent to initialise dataset {}".format(end-start))
+    print("time spent to initialise dataset!!! {}".format(end-start))
     leng = dataset.__len__()
     model = ScaffoldGNN(6)
     start = time.process_time()
-    ds_loader = torch.utils.data.DataLoader(dataset=dataset, collate_fn=dataset.collate_fn, batch_size=1, shuffle=True)
-    loss = nn.CrossEntropyLoss()
+    ds_loader = torch.utils.data.DataLoader(dataset=dataset, collate_fn=dataset.collate_fn, batch_size=2, shuffle=False)
+    loss_n = nn.CrossEntropyLoss()
+    loss_e = nn.CrossEntropyLoss()
+    loss_d = nn.CrossEntropyLoss(reduction="none")
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    writer = open("../data/error.txt", "w")
-    for i, (g, g_scaffold, action, condition, isomer_target, w_index, _,s_index,_, id) in enumerate(ds_loader):
-        #print(isomer_target, isomer_target.__len__())
-        try:
-            _,_,_,a,b,c,d,a1,b1,c1,d1,gl = model(g, g_scaffold, condition, action, isomer_target, w_index, s_index)
-        #print(gl[0].ndata["atom_type"], gl[0].num_nodes())
-            #print(i,len(d), len(d1))
-        #print(d, d1)
+    print("ini")
+    for e in range(100):
+        for i, (g, g_scaffold, action, condition, w_index, _,s_index,_) in enumerate(ds_loader):
+            #print(isomer_target, isomer_target.__len__())
+            start = time.process_time()
+            z, logvar, mu, node_prop, edge_prop, dest_prop,node_prop_gt,edge_prop_gt,dest_prop_gt, graph_list = model(g, g_scaffold, condition, action, w_index, s_index)
             end = time.process_time()
-            print("time spent to read dataset {}".format(end-start))
-        except:
-            writer.write(id + "\n")
+            #print("time spent to read dataset {}".format(end-start))
+            #print("node", torch.cat(node_prop, 0).size(),torch.tensor(node_prop_gt).size())
+            #print("edge", torch.cat(edge_prop, 0).size(),torch.tensor(edge_prop_gt).size())
+            #print("dest", torch.cat(dest_prop, 0).size(),torch.tensor(dest_prop_gt).size())
+            loss_node = loss_n(torch.cat(node_prop, 0),torch.tensor(node_prop_gt))
+            loss_edge = loss_e(torch.cat(edge_prop, 0),torch.tensor(edge_prop_gt))
+            loss_dest = torch.tensor([])
+            for j,dest in enumerate(dest_prop):
+                #print(torch.tensor(dest).unsqueeze(0), torch.tensor(dest_prop_gt[j], dtype=torch.float).unsqueeze(0))
+                batch_loss = loss_d(dest.unsqueeze(0), torch.as_tensor(dest_prop_gt[j]).unsqueeze(0).long())
+                loss_dest = torch.cat([loss_dest, batch_loss], dim=0)
+                #print(batch_loss)
+            loss_dest = torch.mean(loss_dest)
+            #print(loss_dest)
+            kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
+            loss = loss_node + loss_edge + loss_dest + kld_loss
+            print(loss_node.item(), loss_edge.item() , loss_dest.item() , kld_loss.item())
+            optimizer.zero_grad()
 
-    writer.close()
-        #out = loss(torch.cat(a, 0),torch.tensor(a1))
-        #optimizer.zero_grad()
-        #start = time.process_time()
-        #out.backward()
-        # Update weights
-        #optimizer.step()
-        #end = time.process_time()
-        #print("time spent backprop {}".format(end-start))
-        #print("loss {}".format(out))
+            start = time.process_time()
+            loss.backward()
+            # Update weights
+            optimizer.step()
+            end = time.process_time()
+            print("time spent backprop {}".format(end-start))
+            print("loss {}".format(loss))

@@ -19,18 +19,11 @@ def dgl_to_mol(G):
 
     # {atomic_type: atomic number} for nodes in graph G
     atomic_num = {0:6, 1:7, 2:8, 3:9, 4:15, 5:16, 6:17, 7:35}
-    #explicit_type = {0:0, 1:1, 2:2, 3:3}
-    charges = {0:0, 1:1, 2:-1, 3:2, 4:-2, 5:3, 6:-3, 7:4, 8:-4}
     aromaticity = {0:False, 1:True}
-    # add atoms to mol object
-    #node_to_idx = {}
+
     for node in G.nodes():
         a=Chem.Atom(atomic_num[G.ndata["atom_type"][node].item()])
-        #a.SetIsAromatic(aromaticity[G.ndata["aromatic_type"][node].item()])
-        #a.SetNumExplicitHs(G.ndata["explicit_hydrogen"][node].item())
-        #a.SetFormalCharge(charges[G.ndata["charge_type"][node].item()])
         idx = mol.AddAtom(a)
-        #node_to_idx[node.item()] = idx
 
     # {bond_type: rdkit.BondType} for edges in graph G
     bond_types = {
@@ -38,46 +31,50 @@ def dgl_to_mol(G):
         1:Chem.rdchem.BondType.DOUBLE,
         2:Chem.rdchem.BondType.TRIPLE
         }
+
     # add bonds to mol object
-    edges = zip(G.edges()[0].tolist()[::2],G.edges()[1].tolist()[::2])
-    #assert "incorrect bond", G.edata["bond_type"].tolist()[::2] == G.edata["bond_type"].tolist()[1::2]
+    edges = zip(G.edges()[0].tolist()[1::2],G.edges()[1].tolist()[1::2])
     for j,edge in enumerate(edges):
         first, second = edge
         bond_type = bond_types[G.edata["bond_type"][j*2].item()]
         mol.AddBond(first, second, bond_type)
-    # add charged to N where it has unnecessary unpaired electrons
+
     mol.UpdatePropertyCache(strict=False)
     pt = Chem.GetPeriodicTable()
-    neutralise = charge.Uncharger()
     for j,at in enumerate(mol.GetAtoms()):
         atomic_num = at.GetAtomicNum()
-        #print(j,at.GetSymbol(), at.GetFormalCharge(), at.GetNumExplicitHs(),at.GetExplicitValence(), at.GetTotalValence(), pt.GetDefaultValence(atomic_num))
+        at.SetFormalCharge(0)
+        #print(j,at.GetSymbol(), [j.GetSymbol() for j in at.GetNeighbors()] ,[j.GetBondType() for j in at.GetBonds()])#,
+        #print(j,at.GetSymbol(), "fc",at.GetFormalCharge(), 'exh',at.GetNumExplicitHs(),'th',at.GetTotalNumHs(),'exv',at.GetExplicitValence(),'tv',at.GetTotalValence(), pt.GetDefaultValence(atomic_num))
+
         tv, dv = at.GetTotalValence(), pt.GetDefaultValence(atomic_num)
         if tv > dv:
-            if at.GetNumExplicitHs() > 0:
-                at.SetNumExplicitHs(at.GetNumExplicitHs() - (tv-dv))
-                at.SetFormalCharge(0)
-                print("N")
-            elif at.GetNumExplicitHs() == 0 and at.GetFormalCharge() == 0:
-                if at.GetSymbol() not in ["P", "S"]:
-                    at.SetFormalCharge(tv-dv)
-            elif at.GetNumExplicitHs() == 0 and at.GetExplicitValence() == dv and at.GetFormalCharge() != 0:
-                if at.GetSymbol() not in ["P", "S"]:
-                    at.SetFormalCharge(0)
-            #elif at.GetNumExplicitHs() == 0 and at.GetExplicitValence() > 0
-            if at.GetSymbol() in ["P", "S"]:
-                if at.GetExplicitValence() != at.GetTotalValence():
-                    at.SetFormalCharge(at.GetTotalValence() - at.GetExplicitValence())
-
-        elif tv < dv and at.GetFormalCharge() != 0:
+            at.SetNoImplicit(True)
+            eh, new_tv = at.GetNumExplicitHs(), at.GetTotalValence()
+            if eh > 0:
+                if eh-(new_tv - dv) >= 0:
+                    at.SetNumExplicitHs(eh-(new_tv - dv))
+                else:
+                    at.SetNumExplicitHs(0)
+                    at.SetFormalCharge((new_tv - dv) - eh)
+            elif eh == 0:
+                if 0<= new_tv - dv <= 1:
+                    at.SetFormalCharge(new_tv - dv)
+                else:
+                    pass
+            #at.SetNoImplicit(False)
+        elif tv < dv:
+            #at.SetFormalCharge(-(dv-tv))
             at.SetFormalCharge(0)
             at.SetNumExplicitHs(at.GetNumExplicitHs() + dv-tv)
+        else:
+            pass
         at.SetNumRadicalElectrons(0)
-        #print(j,at.GetSymbol(), at.GetFormalCharge(), at.GetNumExplicitHs(),at.GetExplicitValence(),at.GetTotalValence(), pt.GetDefaultValence(atomic_num))
-
+        mol.UpdatePropertyCache(strict=False)
+        #print(j,at.GetSymbol(), "fc",at.GetFormalCharge(), 'exh',at.GetNumExplicitHs(),'th',at.GetTotalNumHs(),'exv',at.GetExplicitValence(),'tv',at.GetTotalValence(), pt.GetDefaultValence(atomic_num))
 
     Chem.rdmolops.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL)
-    #print(Chem.MolToSmiles(mol, canonical=True))
+    #print("aa",Chem.MolToSmiles(mol, canonical=True))
     return mol, Chem.MolToSmiles(mol, canonical=True)
 
 

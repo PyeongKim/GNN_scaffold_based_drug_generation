@@ -14,12 +14,13 @@ from m_helper_functions import dgl_to_mol, enum_stereoisomer
 
 
 class ScaffoldGNN(nn.Module):
-    def __init__(self, num_auxiliary, num_prop_rounds=[3,3,2,2,2,2],
-                 num_node_features=[8,4,9,2], num_edge_features=[3,5],  # if aromatic included [4,5]
+    def __init__(self, num_auxiliary, device, num_prop_rounds=[3,3,2,2,2,2],
+                 num_node_features=[8,4,9,2], num_edge_features=[3,6],  # if aromatic included [4,5]
                  node_emb_dim=128, edge_emb_dim=128, edge_embedding_per_round=True):
         super(ScaffoldGNN, self).__init__()
 
         # set number of propagation of each propagating functions
+        self.device = device
         self.num_prop_rounds = {"whole":None, "scaffold":None,
                                 "addnode":None, "addedge":None,
                                 "selectnode":None, "selectisomer":None}
@@ -79,7 +80,7 @@ class ScaffoldGNN(nn.Module):
         # in this case we did not use num_edge_types + 1
         # instead we used num_edge_type because we are not considering adding aromatic bonds
         # thus, the final logit would correspond to [single, double, triple, STOP]
-        self.add_edges_mlp = MLP(3, node_emb_dim + num_auxiliary_decode, node_emb_dim, self.num_edge_types, True)
+        self.add_edges_mlp = MLP(3, node_emb_dim + num_auxiliary_decode, node_emb_dim, self.num_edge_types + 1, True)
         #self.add_edges_softmax = nn.Softmax(dim=1)
 
         # init edge
@@ -218,6 +219,7 @@ class ScaffoldGNN(nn.Module):
         else:
             return logits
 
+    """
     def select_isomer_encode(self, g, condition, training=True):
         mol, smiles = dgl_to_mol(g)  #test_fix_all
         assert mol is not None, "Not valid molecule"
@@ -247,10 +249,10 @@ class ScaffoldGNN(nn.Module):
             return isomers_smi[dist.sample().item()]
         else:
             return isomers, logits, smiles #test_fix_all
+    """
 
 
-
-    def forward(self, g_whole, g_scaffold, conditions, actions, isomer_target, batch_index, sc_index):
+    def forward(self, g_whole, g_scaffold, conditions, actions,  batch_index, sc_index):
         self.prepare_for_traininig()
         z, logvar, mu = self.whole_graph_encode(g_whole, conditions, batch_index)
         g_scaffold = self.scaffold_propagate(g_scaffold, conditions, sc_index)
@@ -260,8 +262,8 @@ class ScaffoldGNN(nn.Module):
         #print("!!!!!!!!!!!!!!!!!!!!conditions", conditions.size())
         g_scaffold_list = dgl.unbatch(g_scaffold)
         for i in range(len(g_scaffold_list)):
-            sub_graph, sub_action, sub_condition, sub_isomer_target = \
-                                            g_scaffold_list[i], actions[i], conditions[i].unsqueeze(0), isomer_target[i]
+            sub_graph, sub_action, sub_condition = \
+                                            g_scaffold_list[i], actions[i], conditions[i].unsqueeze(0)
             #print(sub_graph.ndata["explicit_hydrogen"])
             add_node = True
             index = 0
@@ -280,7 +282,7 @@ class ScaffoldGNN(nn.Module):
                 else:
                     num_nodes = sub_graph.number_of_nodes()
                     # get node feature
-                    init_node = sub_action[index][0]
+                    init_node = sub_action[index][0].to(self.device)
                     new_node_feat = self.init_nodes_encode(sub_graph, init_node)
                     sub_graph.add_nodes(1)
                     # print(new_node_feat.size(), g_scaffold.nodes[num_nodes - 1].data['node_features'].size())
@@ -299,7 +301,7 @@ class ScaffoldGNN(nn.Module):
                         add_edge = False
                         continue
                     else:
-                        init_edge = sub_action[index][1][edge_index].unsqueeze(0)  # edge types
+                        init_edge = sub_action[index][1][edge_index].unsqueeze(0).to(self.device)  # edge types
                         # print("after scaffold:",g_scaffold.edata["edge_features"].size())
                         select_node = self.select_nodes_encode(sub_graph, sub_condition, None)
                         # print("###############after scaffold:",g_scaffold.edata["edge_features"].size())
@@ -317,17 +319,12 @@ class ScaffoldGNN(nn.Module):
                     edge_index += 1
                 index += 1
             g_scaffold_list[i] = sub_graph
-            #print(i)
-            _, logits, smiles = self.select_isomer_encode(sub_graph, sub_condition) #test_fix_all
-            self.isomer_probability.extend(torch.squeeze(logits, 1).tolist())
-            self.isomer_probability_gt.extend(sub_isomer_target)
-
 
 
         return z, logvar, mu, \
-               self.node_probability, self.edge_probability, self.dest_probability, self.isomer_probability,\
-               self.node_probability_gt, self.edge_probability_gt, self.dest_probability_gt, self.isomer_probability_gt,\
-               g_scaffold_list, smiles #test_fix_all
+               self.node_probability, self.edge_probability, self.dest_probability,\
+               self.node_probability_gt, self.edge_probability_gt, self.dest_probability_gt,\
+               g_scaffold_list
 
 
     def sample(self, num_samples, g_scaffold_batch, conditions_batch, smi_batch, save_file):
@@ -386,11 +383,7 @@ class ScaffoldGNN(nn.Module):
                             sub_graph.edges[src_list, dest_list].data['bond_type'] = torch.cat([selected_edge, selected_edge], dim=0)
                         edge_index += 1
                     index += 1
-                selected_isomer = self.select_isomer_encode(sub_graph, sub_condition, False) #test_fix_all
-                self.selected_isomers.append(selected_isomer)
-            for smi in self.selected_isomers:
-                csv_file.write(smi_batch[batch], smi, "\n")
-        csv_file.close()
+
 
 
 class ConditionalProp(nn.Module):
@@ -437,7 +430,7 @@ class MLP(nn.Module):
         output_dim (int): number of classes for prediction
         batch_norm (Bool): batch normalisation of after MLP (default to True)
     """
-    def __init__(self, num_layers, input_dim, hidden_dim, output_dim, batch_norm=True):
+    def __init__(self, num_layers, input_dim, hidden_dim, output_dim, batch_norm=False):
         super(MLP, self).__init__()
 
         self.linear_or_not = True #default is linear model
